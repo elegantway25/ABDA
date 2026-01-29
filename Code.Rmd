@@ -1,0 +1,500 @@
+---
+title: "ABDA"
+author: "Danaia Burtseva&Gleb Ryzhkovski"
+date: "2026-01-27"
+output: pdf_document
+---
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+```
+
+
+
+
+```{r setup, include=FALSE}
+
+# install.packages("brms")
+# install.packages("rstan")
+
+# Sys.setenv(SDKROOT = system("xcrun --show-sdk-path", intern = TRUE))
+# Sys.getenv("SDKROOT")
+# 
+# sdk <- system("xcrun --show-sdk-path", intern = TRUE)
+
+# # добавляем include для libc++ headers
+# Sys.setenv(
+#   CXXFLAGS = paste(Sys.getenv("CXXFLAGS"), paste0("-isysroot ", shQuote(sdk), " -I", shQuote(file.path(sdk, "usr/include/c++/v1")))),
+#   CFLAGS   = paste(Sys.getenv("CFLAGS"),   paste0("-isysroot ", shQuote(sdk))),
+#   CPPFLAGS = paste(Sys.getenv("CPPFLAGS"), paste0("-isysroot ", shQuote(sdk)))
+# )
+# 
+# # Для надежности ещё раз покажем
+# Sys.getenv("CXXFLAGS")
+# 
+
+
+library("brms")
+# library("rstan")
+
+
+setwd("//Users/dana/Documents/ABDA/ABDA-git")
+# 
+turbine_metadata <- read.csv("2024/Hill_of_Towie_turbine_metadata.csv")
+turbine_fields_description <- read.csv("2024/Hill_of_Towie_turbine_fields_description.csv")
+tables_description <- read.csv("2024/Hill_of_Towie_tables_description.csv")
+# ShutdownDuration <- read.csv("ShutdownDuration.csv")
+grid_fields_description <- read.csv("2024/Hill_of_Towie_grid_fields_description.csv")
+# alarms_description <- read.csv("Hill_of_Towie_alarms_description.csv")
+# AeroUp_install_dates <- read.csv("Hill_of_Towie_AeroUp_install_dates.csv")
+
+# alle Tabellen ohne tbl am Anfang
+# Daten für alle Turbinen
+GridScientific_2024_04 <- read.csv("2024/tblGridScientific_2024_04.csv")
+
+# Daten für jede einzelne Turbine
+SCTurbine_2024_04 <- read.csv("2024/tblSCTurbine_2024_04.csv")
+
+SCTurGrid_2024_04 <- read.csv("2024/tblSCTurGrid_2024_04.csv")
+
+
+
+
+# GridData <- data.frame(TimeStamp = GridScientific_2024_04$TimeStamp, 
+#                        ActivePower_mean = GridScientific_2024_04$ActivePowerMean 
+#                        )
+
+GridData <- data.frame(
+  TimeStamp = GridScientific_2024_04$TimeStamp,
+  ActivePower_mean = GridScientific_2024_04$ActivePowerMean
+)
+
+# parse timestamps consistently
+SCTurbine_2024_04$TimeStamp  <- as.POSIXct(SCTurbine_2024_04$TimeStamp,  "%Y-%m-%d %H:%M:%S", tz="UTC")
+SCTurGrid_2024_04$TimeStamp  <- as.POSIXct(SCTurGrid_2024_04$TimeStamp,  "%Y-%m-%d %H:%M:%S", tz="UTC")
+
+# build turbine table
+TurbineData <- data.frame(
+  TimeStamp = SCTurbine_2024_04$TimeStamp,
+  StationId = as.character(SCTurbine_2024_04$StationId),
+  AcWindSp_mean = SCTurbine_2024_04$wtc_AcWindSp_mean,
+  PrWindSp_mean = SCTurbine_2024_04$wtc_PrWindSp_mean,
+  SeWindSp_mean = SCTurbine_2024_04$wtc_SeWindSp_mean,
+  AcWindDir_mean = SCTurbine_2024_04$wtc_ActualWindDirection_mean
+)
+
+# merge power ONCE
+SCTurGrid_2024_04$StationId <- as.character(SCTurGrid_2024_04$StationId)
+
+TurbineData <- merge(
+  TurbineData,
+  SCTurGrid_2024_04[, c("TimeStamp", "StationId", "wtc_ActPower_mean")],
+  by = c("TimeStamp", "StationId"),
+  all.x = TRUE,
+  sort = FALSE
+)
+names(TurbineData)[names(TurbineData) == "wtc_ActPower_mean"] <- "ActivePower_mean"
+
+# merge metadata
+turbine_metadata$`Station.ID` <- as.character(turbine_metadata$`Station.ID`)
+TurbineData <- merge(
+  TurbineData,
+  turbine_metadata[, c("Turbine.Name", "Station.ID")],
+  by.x = "StationId",
+  by.y = "Station.ID",
+  all.x = TRUE,
+  sort = FALSE
+)
+names(TurbineData)[names(TurbineData) == "Turbine.Name"] <- "TurbineName"
+
+# order for time series
+TurbineData <- TurbineData[order(TurbineData$TurbineName, TurbineData$TimeStamp), ]
+
+
+sum(is.na(TurbineData$ActivePower_mean))
+table(is.na(TurbineData$ActivePower_mean))
+
+names(TurbineData)[grepl("ActPower|ActivePower|wtc_ActPower", names(TurbineData))]
+
+length(unique(TurbineData$TurbineName))
+any(duplicated(TurbineData[, c("TurbineName","TimeStamp")]))
+
+
+# Pick a threshold and keep only producing data:
+  
+p_min <- 10  # kW example (adjust)
+TD <- subset(TurbineData, ActivePower_mean > p_min & AcWindSp_mean > 0)
+
+```
+
+```{r}
+TD %>%
+  group_by(TurbineName) %>%
+  summarise(
+    n = n(),
+    min_dt = min(diff(TimeStamp)),
+    max_dt = max(diff(TimeStamp))
+  )
+```
+
+```{r}
+p_min <- 10  # example kW threshold
+# check remove only negative
+TD <- subset(TurbineData, !is.na(TurbineName) &
+                        ActivePower_mean > p_min &
+                        AcWindSp_mean > 0)
+```
+
+
+```{r}
+TD <- TD[order(TD$TurbineName, TD$TimeStamp), ]
+TD$t_index <- ave(TD$TimeStamp, TD$TurbineName, FUN = seq_along)
+```
+
+```{r}
+names(TD)[names(TD) == "t_index"]
+head(TD[, c("TurbineName", "TimeStamp", "t_index")])
+```
+
+```{r}
+"t_index" %in% names(TD)
+str(TD$t_index)
+summary(TD$t_index)
+packageVersion("brms")
+```
+
+
+
+```{r}
+
+library(brms)
+options(brms.backend = "cmdstanr")
+
+
+fit <- brm(
+  ActivePower_mean ~ s(AcWindSp_mean, k = 10) + (1 | TurbineName),
+  data = TD,
+  family = lognormal(),
+  chains = 4, iter = 2000, cores = 4
+)
+
+# TimeStamp
+```
+
+
+```{r}
+# saveRDS(fit, file = "brms_fit_lognormal_spline.rds")
+sink("brms_fit_summary.txt")
+print(summary(fit))
+sink()
+
+
+# fit <- readRDS("brms_fit_lognormal_spline.rds")
+
+
+```
+
+
+
+```{r}
+summary(fit)
+mcmc_plot(fit,type="trace")
+```
+
+
+
+```{r}
+plot(fit)      # trace + density plots for key parameters
+pp_check(fit)  # posterior predictive check
+```
+
+
+```{r}
+
+pp_check(fit, type = "scatter_avg", ndraws = 50)
+
+```
+
+```{r}
+plot(conditional_smooths(fit), ask = FALSE)
+```
+
+
+```{r}
+png("pp_check.png", width=1400, height=900, res=150)
+pp_check(fit)
+dev.off()
+```
+
+````{r}
+setwd("//Users/dana/Documents/ABDA/ABDA-git")
+# 
+turbine_metadata <- read.csv("Hill_of_Towie_turbine_metadata.csv")
+# turbine_fields_description <- read.csv("Hill_of_Towie_turbine_fields_description.csv")
+# tables_description <- read.csv("Hill_of_Towie_tables_description.csv")
+# ShuTDownDuration <- read.csv("ShuTDownDuration.csv")
+# grid_fields_description <- read.csv("Hill_of_Towie_grid_fields_description.csv")
+# alarms_description <- read.csv("Hill_of_Towie_alarms_description.csv")
+# AeroUp_install_dates <- read.csv("Hill_of_Towie_AeroUp_install_dates.csv")
+
+# Turbine data for April 2024
+GridScientific_2024_04 <- read.csv("2024/tblGridScientific_2024_04.csv")
+
+SCTurbine_2024_04 <- read.csv("2024/tblSCTurbine_2024_04.csv")
+SCTurGrid_2024_04 <- read.csv("2024/tblSCTurGrid_2024_04.csv")
+SCTurFlag_2024_04 <- read.csv("2024/tblSCTurFlag_2024_04.csv")
+
+# Take time stamps, Ids, wind speeds and wind directions from SCTurbine_2024_04
+TD <- 
+  data.frame(TimeStamp = SCTurbine_2024_04$TimeStamp, 
+             StationId = SCTurbine_2024_04$StationId,
+             AcWindSp = SCTurbine_2024_04$wtc_AcWindSp_mean, 
+             # PrWindSp = SCTurbine_2024_04$wtc_PrWindSp_mean,
+             # SeWindSp = SCTurbine_2024_04$wtc_SeWindSp_mean,
+             
+             NacelPos = SCTurbine_2024_04$wtc_NacelPos_mean,
+             PitchA = SCTurbine_2024_04$wtc_PitcPosA_mean, 
+             PitchB = SCTurbine_2024_04$wtc_PitcPosB_mean, 
+             PitchC = SCTurbine_2024_04$wtc_PitcPosC_mean, 
+             WindDir = SCTurbine_2024_04$wtc_ActualWindDirection_mean)
+
+
+
+# Merge with ActivePower from SCTurGrid_2024_04
+TD <- merge(
+  TD,
+  SCTurGrid_2024_04[, c("TimeStamp", "StationId", "wtc_ActPower_mean")],
+  by = c("TimeStamp", "StationId"),
+  all.x = TRUE,
+  sort = FALSE
+)
+names(TD)[names(TD) == "wtc_ActPower_mean"] <- "ActivePower"
+
+# Connect turbine ids with their names (ex. T01) from turbine_metadata
+TD <- merge(
+  TD,
+  turbine_metadata[, c("Turbine.Name", "Station.ID")],
+  by.x = c("StationId"),
+  by.y = c("Station.ID"),
+  all.x = TRUE,
+  sort = FALSE
+)
+names(TD)[names(TD) == "Turbine.Name"] <- "TurbineName"
+
+# Merge with TimeInOper from SCTurFlag_2024_04 (Time the turbine was running in a given 10-minute period)
+# TD <- merge(
+#   TD, 
+#   SCTurFlag_2024_04[, c("TimeStamp", "StationId", "wtc_ScInOper_timeon")], 
+#   by = c("TimeStamp", "StationId"), 
+#   all.x = TRUE,
+#   sort = FALSE
+# )
+
+TD <- merge(
+  TD, 
+  SCTurFlag_2024_04, 
+  by = c("TimeStamp", "StationId"), 
+  all.x = TRUE,
+  sort = FALSE
+)
+
+names(TD)[names(TD) == "wtc_ScInOper_timeon"] <- "TimeInOper"
+
+
+# Sort the data by the time stamp
+TD <- TD[order(TD$TimeStamp), ]
+````
+
+```{r}
+
+PITCH_STOP_THRESH <- 10.76772   # degrees
+head(TD)
+```
+
+```{r}
+plot(TD$PitchC[TD$TurbineName=="T01"])
+```
+
+Pitch stop estimation.
+```{r}
+
+TD <- TD %>%
+  mutate(PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE)) %>%
+  filter(TimeInOper == 600) %>%                 # keep only full 10-min operation
+  filter(!is.na(PitchMax))
+
+pitch_stop_95 <- quantile(TD$PitchMax, probs = 0.95, na.rm = TRUE)
+pitch_stop_95
+#      95% 
+# 10.76772 
+```
+
+
+
+````{r}
+Pr <- 2300
+
+TD <- TD %>%
+  mutate(
+    PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE),
+    Pnorm = ActivePower / Pr
+  )
+
+
+
+
+# TD_clean <- TD %>%
+#   mutate(PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE),
+#          flag_pitch_stop = PitchMax > pitch_stop_95) %>%
+#   filter(TimeInOper == 600) %>%
+#   filter (Pnorm>0 )%>%
+#   filter (Pnorm<0.99 )%>%
+#   filter(!flag_pitch_stop)
+
+TD_clean <- TD %>%
+  mutate(
+    PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE),
+    flag_pitch_stop = PitchMax > pitch_stop_95
+  ) %>%
+  filter(
+    TimeInOper == 600,
+    Pnorm > 0, Pnorm < 0.99,
+    !flag_pitch_stop
+  )
+````
+
+
+
+
+````{r}
+
+
+Pr <- 2300
+BIN_WIDTH <- 0.5
+
+slopes <- TD %>%
+  filter(TimeInOper==600, ActivePower>=0, AcWindSp>=0) %>%
+  mutate(Pnorm = ActivePower/Pr,
+         ws_bin = floor(AcWindSp/BIN_WIDTH)*BIN_WIDTH) %>%
+  group_by(TurbineName, ws_bin) %>%
+  summarise(ws = mean(AcWindSp), p = mean(Pnorm), n=n(), .groups="drop") %>%
+  group_by(TurbineName) %>%
+  arrange(ws, .by_group=TRUE) %>%
+  mutate(slope = c(NA, diff(p)/diff(ws))) %>%
+  ungroup()
+
+# Estimate a "flat" slope threshold from high-power points
+# (where plateau/curtailment typically occurs)
+SLOPE_EPS_est <- slopes %>%
+  filter(p >= 0.70, !is.na(slope)) %>%
+  summarise(th = quantile(abs(slope), 0.10, na.rm=TRUE)) %>%  # 10th percentile
+  pull(th)
+
+SLOPE_EPS_est
+````
+
+````{r}
+TD_clean <- TD_clean %>%
+  group_by(StationId) %>%
+  mutate(t_min = as.numeric(difftime(TimeStamp, min(TimeStamp), units = "mins"))) %>%
+  ungroup()
+head(TD_clean)
+````
+
+```{r}
+# autocor = cor_car(~ t_min | StationId)
+
+summary(TD_clean$Pnorm)
+any(TD_clean$Pnorm <= 0, na.rm=TRUE)
+names(TD_clean)
+TD_clean <- TD_clean %>% mutate(logP = log(Pnorm))
+exists("TD_clean")
+class(TD_clean)
+dim(TD_clean)
+names(TD_clean)
+"AcWindSp" %in% names(TD_clean)
+
+
+
+
+```
+
+
+
+```{r}
+exists("TD_clean")
+class(TD_clean)
+dim(TD_clean)
+names(TD_clean)
+"AcWindSp" %in% names(TD_clean)
+summary(TD_clean$t_min)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(TD_clean, aes(x = TimeStamp, y = Pnorm, group = TurbineName, color = TurbineName)) +
+  geom_line(linewidth = 0.3, alpha = 0.7) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Time", y = "Pnorm")
+
+
+```
+
+
+```{r}
+plot(
+  TD_clean$AcWindSp, TD_clean$logP,
+  pch = 16, cex = 0.4,
+  xlab = "Wind speed (m/s)",
+  ylab = "LogP",
+  main = "Wind speed vs LogP"
+)
+```
+
+
+
+```{r}
+library(cmdstanr)
+options(brms.backend = "cmdstanr")
+
+
+
+# fit_ar_light <- brm(
+#   logP ~ s(AcWindSp, k = 4) + (1 | StationId), 
+#     # ar(time = t_min, gr = StationId, p = 1, cov = FALSE),
+#   data = TD_clean,
+#   family = gaussian(),
+#   chains = 2, iter = 1200, cores = 2,
+#   refresh = 10
+# )
+
+```
+
+```{r}
+
+summary(fit_ar_light)
+mcmc_plot(fit_ar_light,type="trace")
+```
+
+
+````{r}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+dogs <- stan_demo("dogs")
+dogs
+````
+
+```{r}
+# fit_gp <- brm(
+#   logP ~ 1 + s(AcWindSp, k = 5) + gp(t_min, by = TurbineName),
+#   data = TD_clean,
+#   family = gaussian()
+# )
+```
+

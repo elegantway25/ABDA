@@ -1,0 +1,164 @@
+     95% 
+10.76772 
+     95% 
+10.76772 
+     95% 
+10.76772 
+        10% 
+0.006991099 
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/-\|/- Running MCMC with 2 parallel chains...
+
+Chain 1 Iteration:    1 / 1200 [  0%]  (Warmup) 
+Chain 2 Iteration:    1 / 1200 [  0%]  (Warmup) 
+Chain 2 Iteration:  100 / 1200 [  8%]  (Warmup) 
+Chain 1 Iteration:  100 / 1200 [  8%]  (Warmup) 
+Chain 1 Iteration:  200 / 1200 [ 16%]  (Warmup) 
+Chain 2 Iteration:  200 / 1200 [ 16%]  (Warmup) 
+Running MCMC with 2 parallel chains...
+
+Chain 1 Iteration:    1 / 1200 [  0%]  (Warmup) 
+Chain 2 Iteration:    1 / 1200 [  0%]  (Warmup) 
+Chain 1 Iteration:   10 / 1200 [  0%]  (Warmup) 
+Chain 2 Iteration:   10 / 1200 [  0%]  (Warmup) 
+Chain 1 Iteration:   20 / 1200 [  1%]  (Warmup) 
+Chain 2 Iteration:   20 / 1200 [  1%]  (Warmup) 
+Chain 1 Iteration:   30 / 1200 [  2%]  (Warmup) 
+Chain 2 Iteration:   30 / 1200 [  2%]  (Warmup) 
+Chain 1 Iteration:   40 / 1200 [  3%]  (Warmup) 
+Chain 2 Iteration:   40 / 1200 [  3%]  (Warmup) 
+Chain 1 Iteration:   50 / 1200 [  4%]  (Warmup) 
+Chain 1 Iteration:   60 / 1200 [  5%]  (Warmup) 
+Chain 1 Iteration:   70 / 1200 [  5%]  (Warmup) 
+Chain 1 Iteration:   80 / 1200 [  6%]  (Warmup) 
+Chain 2 Iteration:   50 / 1200 [  4%]  (Warmup) 
+Chain 1 Iteration:   90 / 1200 [  7%]  (Warmup) 
+Chain 1 Iteration:  100 / 1200 [  8%]  (Warmup) 
+Chain 1 Iteration:  110 / 1200 [  9%]  (Warmup) 
+Chain 1 Iteration:  120 / 1200 [ 10%]  (Warmup) 
+Chain 2 Iteration:   60 / 1200 [  5%]  (Warmup) 
+Chain 1 Iteration:  130 / 1200 [ 10%]  (Warmup) 
+Chain 2 Iteration:   70 / 1200 [  5%]  (Warmup) 
+Chain 2 Iteration:   80 / 1200 [  6%]  (Warmup) 
+Chain 1 Iteration:  140 / 1200 [ 11%]  (Warmup) 
+Chain 2 Iteration:   90 / 1200 [  7%]  (Warmup) 
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+1.033e-05 1.400e-01 3.134e-01 3.901e-01 6.096e-01 9.900e-01 
+[1] FALSE
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
+[1] "tbl_df"     "tbl"        "data.frame"
+[1] 62223    16
+ [1] "TimeStamp"       "StationId"       "AcWindSp"       
+ [4] "NacelPos"        "PitchA"          "PitchB"         
+ [7] "PitchC"          "WindDir"         "ActivePower"    
+[10] "TurbineName"     "TimeInOper"      "PitchMax"       
+[13] "Pnorm"           "flag_pitch_stop" "t_min"          
+[16] "logP"           
+[1] TRUE
