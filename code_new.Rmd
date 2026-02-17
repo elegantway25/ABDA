@@ -1,0 +1,905 @@
+---
+title: "ABDA"
+author: "Danaia Burtseva & Gleb Ryzhkovski"
+date: "2026-01-27"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Core
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# Bayesian modelling
+library(brms)
+library(cmdstanr)
+library(posterior)
+library(bayesplot)
+
+options(brms.backend = "cmdstanr")
+
+# -----------------------------
+# Project paths + constants
+# -----------------------------
+DATA_DIR <- "//Users/dana/Documents/ABDA/ABDA-git"   # adjust once
+DIR_2024  <- file.path(DATA_DIR, "2024")
+
+PR_KW <- 2300                       # rated power [kW]
+P_MIN_KW <- 10                      # minimum power threshold [kW]
+WS_MIN <- 4                         # wind speed lower bound [m/s]
+WS_MAX <- 13.5                      # wind speed upper bound [m/s]
+PNORM_MIN <- 0.05                   # normalized power lower bound
+PNORM_MAX <- 0.95                   # normalized power upper bound
+FULL_OPER_S <- 600                  # full 10-min interval
+BIN_WIDTH <- 0.5                    # used for slope diagnostics
+
+# Helper: consistent timestamp parsing
+parse_ts_utc <- function(x) as.POSIXct(x, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+```
+
+
+````{r}
+# Metadata
+turbine_metadata <- read.csv(file.path(DIR_2024, "Hill_of_Towie_turbine_metadata.csv")) %>%
+  mutate(`Station.ID` = as.character(`Station.ID`)) %>%
+  select(TurbineName = Turbine.Name, StationId = Station.ID)
+
+# SCADA tables (April 2024)
+SCTurbine <- read.csv(file.path(DIR_2024, "tblSCTurbine_2024_04.csv")) %>%
+  mutate(
+    TimeStamp = parse_ts_utc(TimeStamp),
+    StationId = as.character(StationId)
+  )
+
+SCTurGrid <- read.csv(file.path(DIR_2024, "tblSCTurGrid_2024_04.csv")) %>%
+  mutate(
+    TimeStamp = parse_ts_utc(TimeStamp),
+    StationId = as.character(StationId)
+  ) %>%
+  select(TimeStamp, StationId, ActivePower = wtc_ActPower_mean)
+
+SCTurFlag <- read.csv(file.path(DIR_2024, "tblSCTurFlag_2024_04.csv")) %>%
+  mutate(
+    TimeStamp = parse_ts_utc(TimeStamp),
+    StationId = as.character(StationId)
+  )
+
+GridScientific <- read.csv(file.path(DIR_2024, "tblGridScientific_2024_04.csv"))
+# Select the turbine-level variables you actually use downstream
+TD_raw <- SCTurbine %>%
+  transmute(
+    TimeStamp,
+    StationId,
+    AcWindSp   = wtc_AcWindSp_mean,
+    WindDir    = wtc_ActualWindDirection_mean,
+    NacelPos   = wtc_NacelPos_mean,
+    PitchA     = wtc_PitcPosA_mean,
+    PitchB     = wtc_PitcPosB_mean,
+    PitchC     = wtc_PitcPosC_mean
+  ) %>%
+  left_join(SCTurGrid, by = c("TimeStamp", "StationId")) %>%
+  left_join(SCTurFlag, by = c("TimeStamp", "StationId")) %>%
+  # try to map whatever flag column represents operational time on
+  rename(TimeInOper = wtc_ScInOper_timeon) %>%
+  left_join(turbine_metadata, by = "StationId") %>%
+  arrange(TurbineName, TimeStamp)
+
+# Quick checks
+stopifnot(!anyDuplicated(TD_raw[, c("StationId", "TimeStamp")]))
+summary(is.na(TD_raw$ActivePower))
+length(unique(TD_raw$TurbineName))
+TD_raw <- TD_raw %>%
+  mutate(
+    PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE),
+    Pnorm    = ActivePower / PR_KW
+  )
+
+# Keep only "valid-ish" producing points (basic QC)
+TD_basic <- TD_raw %>%
+  filter(
+    !is.na(TurbineName),
+    !is.na(ActivePower),
+    ActivePower > P_MIN_KW,
+    AcWindSp > 0
+  ) %>%
+  group_by(TurbineName) %>%
+  mutate(t_index = row_number()) %>%
+  ungroup()
+# Estimate pitch stop threshold from full-operation records
+pitch_stop_95 <- TD_raw %>%
+  filter(TimeInOper == FULL_OPER_S, !is.na(PitchMax)) %>%
+  summarise(th = quantile(PitchMax, probs = 0.95, na.rm = TRUE)) %>%
+  pull(th)
+
+pitch_stop_95
+
+TD_clean <- TD_raw %>%
+  mutate(
+    PitchMax = pmax(PitchA, PitchB, PitchC, na.rm = TRUE),
+    Pnorm    = ActivePower / PR_KW,
+    flag_pitch_stop = PitchMax > pitch_stop_95
+  ) %>%
+  filter(
+    TimeInOper == FULL_OPER_S,
+    !flag_pitch_stop,
+    Pnorm > PNORM_MIN, Pnorm < PNORM_MAX,
+    AcWindSp > WS_MIN, AcWindSp < WS_MAX,
+    !is.na(TurbineName),
+    !is.na(AcWindSp),
+    !is.na(Pnorm)
+  ) %>%
+  group_by(StationId) %>%
+  mutate(t_min = as.numeric(difftime(TimeStamp, min(TimeStamp), units = "mins"))) %>%
+  ungroup() %>%
+  mutate(logP = log(Pnorm)) %>%
+  arrange(StationId, t_min)
+
+dim(TD_clean)
+summary(TD_clean$Pnorm)
+
+
+````
+
+````{r}
+
+ggplot(TD_clean, aes(x = TimeStamp, y = Pnorm, group = TurbineName, color = TurbineName)) +
+  geom_line(linewidth = 0.3, alpha = 0.6) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Time", y = "Pnorm", title = "Cleaned normalized power time series (all turbines)")
+plot(
+  TD_clean$AcWindSp, TD_clean$logP,
+  pch = 16, cex = 0.4,
+  xlab = "Wind speed (m/s)",
+  ylab = "log(Pnorm)",
+  main = "Wind speed vs log(Pnorm)"
+)
+````
+
+````{r}
+TD_clean_T1 <- TD_clean %>% filter(TurbineName == "T01")
+
+priors_single <- c(
+  prior(normal(0.5, 0.5), class = "Intercept"),
+  prior(normal(0.05, 0.05), class = "b"),
+  prior(student_t(3, 0, 0.1), class = "sigma")
+)
+
+fit_single <- brm(
+  Pnorm ~ AcWindSp,
+  data = TD_clean_T1,
+  family = gaussian(),
+  prior = priors_single,
+  chains = 2, iter = 2000, cores = 2,
+  control = list(adapt_delta = 0.95)
+)
+````
+
+
+
+````{r}
+priors_ar1 <- c(
+  prior(normal(0.5, 0.5), class = "Intercept"),
+  prior(normal(0.05, 0.05), class = "b"),
+  prior(student_t(3, 0, 0.1), class = "sigma"),
+  prior(normal(0, 0.5), class = "ar")   # phi, shrunk toward 0
+)
+
+fit_ar_single <- brm(
+  Pnorm ~ AcWindSp + ar(time = t_min, p = 1),
+  data = TD_clean_T1,
+  family = gaussian(),
+  prior = priors_ar1,
+  chains = 2, iter = 2000, cores = 2,
+  control = list(adapt_delta = 0.95)
+)
+
+````
+
+````{r}
+priors_gam <- c(
+  prior(normal(0, 1), class = "Intercept"),
+  prior(student_t(3, 0, 0.5), class = "sds"),   # spline smoothness
+  prior(student_t(3, 0, 0.2), class = "sigma")
+)
+
+fit_k_single <- brm(
+  Pnorm ~ s(AcWindSp, k = 10),
+  data = TD_clean_T1,
+  family = gaussian(),
+  prior = priors_gam,
+  chains = 2, iter = 2000, warmup = 1000, cores = 2,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+````
+
+
+````{r}
+
+priors_gam_ar1 <- c(
+  prior(normal(0, 1), class = "Intercept"),
+  prior(student_t(3, 0, 0.5), class = "sds"),
+  prior(normal(0, 0.5), class = "ar"),
+  prior(student_t(3, 0, 0.2), class = "sigma")
+)
+
+fit_k_ar_single <- brm(
+  Pnorm ~ s(AcWindSp, k = 10) + ar(time = t_min, p = 1),
+  data = TD_clean_T1,
+  family = gaussian(),
+  prior = priors_gam_ar1,
+  chains = 2, iter = 2000, warmup = 1000, cores = 2,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+
+````
+
+
+
+````{r}
+
+TD_clean_0 <- TD_clean %>%
+  filter(
+    StationId != "2304530",
+    t_min >= 200,
+    t_min <= 2500
+  )
+
+
+priors_hier_gam_ar1 <- c(
+  prior(normal(0, 1), class = "Intercept"),
+  prior(student_t(3, 0, 0.5), class = "sds"),
+  prior(normal(0, 0.5), class = "ar"),
+  prior(student_t(3, 0, 0.2), class = "sd"),
+  prior(student_t(3, 0, 0.2), class = "sigma")
+)
+
+priors_gam_ar1_gr <- c(
+  prior(normal(0, 1), class = "Intercept"),
+  prior(student_t(3, 0, 0.5), class = "sds"),
+  prior(normal(0, 0.5), class = "ar"),
+  prior(student_t(3, 0, 0.2), class = "sigma")
+)
+
+
+````
+
+```{r}
+fit_k <- brm(
+  Pnorm ~ s(AcWindSp, k = 10) +
+          ar(time = t_min, gr = StationId, p = 1) +
+          (1 | StationId),
+  data = TD_clean_0,
+  family = gaussian(),
+  prior = priors_hier_gam_ar1,
+  chains = 2, cores = 2, iter = 1000,
+  control = list(adapt_delta = 0.95)
+)
+```
+````{r}
+fit_gam_ar1_gr <- brm(
+  Pnorm ~ s(AcWindSp, k = 10) +
+          ar(time = t_min, gr = StationId, p = 1),
+  data = TD_clean_0,
+  family = gaussian(),
+  prior = priors_gam_ar1_gr,
+  chains = 2, cores = 2, iter = 1000,
+  control = list(adapt_delta = 0.95)
+)
+````
+
+
+````{r}
+
+res_k <- residuals(fit_k, summary = TRUE)[, "Estimate"]
+
+acf(res_k, main = "ACF of residuals (AR(1) model)")
+cor(res_k[-1], res_k[-length(res_k)], use = "complete.obs")
+
+````
+
+````{r}
+summary(fit_k)
+mcmc_plot(fit_k, type = "trace")
+pp_check(fit_k)
+````
+
+````{r}
+
+posterior_summary_table <- function(fit_k, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit_k),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_k  <- posterior_summary_table(fit_k)
+# sum_fit_t2 <- posterior_summary_table(fit_t2)
+
+sum_fit_k
+````
+
+````{r}
+
+# Example: save posterior predictive check plot
+png("pp_check_fit_k.png", width=1400, height=900, res=150)
+pp_check(fit_k)
+dev.off()
+
+# # Save fitted models
+# saveRDS(fit_k, file = "fit_k_gam_ar1.rds")
+# saveRDS(fit_t2, file = "fit_t2_hier_ar1.rds")
+````
+
+
+
+````{r}
+
+res_gam_ar1_gr <- residuals(fit_gam_ar1_gr, summary = TRUE)[, "Estimate"]
+
+acf(res_gam_ar1_gr, main = "ACF of residuals (AR(1) model)")
+cor(res_gam_ar1_gr[-1], res_gam_ar1_gr[-length(res_gam_ar1_gr)], use = "complete.obs")
+
+````
+
+
+````{r}
+summary(fit_gam_ar1_gr)
+mcmc_plot(fit_gam_ar1_gr, type = "trace")
+pp_check(fit_gam_ar1_gr)
+````
+
+````{r}
+
+posterior_summary_table <- function(fit_gam_ar1_gr, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit_gam_ar1_gr),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_gam_ar1_gr  <- posterior_summary_table(fit_gam_ar1_gr)
+# sum_fit_t2 <- posterior_summary_table(fit_t2)
+
+sum_fit_gam_ar1_gr
+````
+
+````{r}
+
+# Example: save posterior predictive check plot
+png("pp_check_fit_gam_ar1_gr.png", width=1400, height=900, res=150)
+pp_check(fit_gam_ar1_gr)
+dev.off()
+
+# # Save fitted models
+# saveRDS(fit_k, file = "fit_k_gam_ar1.rds")
+# saveRDS(fit_t2, file = "fit_t2_hier_ar1.rds")
+````
+
+
+````{r}
+
+# ---- folders ----
+dir.create("results", showWarnings = FALSE)
+dir.create("results/figures", showWarnings = FALSE)
+dir.create("results/tables", showWarnings = FALSE)
+dir.create("results/models", showWarnings = FALSE)
+
+# Give the model a name (useful if you have many)
+MODEL_NAME <- "fit_k"
+
+# ---- 1) Save model object ----
+saveRDS(fit_k, file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_k <- residuals(fit_k, summary = TRUE)[, "Estimate"]
+
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_k, main = "ACF of residuals (Hierarchical nonlinear GAM + AR(1) model")
+dev.off()
+
+# # Also save lag-1 residual correlation to a text file
+# lag1_cor <- cor(res_k[-1], res_k[-length(res_k)], use = "complete.obs")
+# writeLines(paste("Lag-1 residual correlation:", lag1_cor),
+#            con = file.path("results", paste0(MODEL_NAME, "_residual_cor.txt")))
+
+# ---- 3) MCMC trace plots ----
+# mcmc_plot returns a ggplot, so save with ggsave
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_k, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_k)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Smooth term plot (for GAM) ----
+p_smooth <- plot(conditional_smooths(fit_k), ask = FALSE)[[1]]
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_smooth.png")),
+       plot = p_smooth, width = 12, height = 7, dpi = 150)
+
+# ---- 6) Posterior summary table (dataframe) ----
+library(posterior)
+
+posterior_summary_table <- function(fit_k, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit_k),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_k <- posterior_summary_table(fit_k)
+
+# Save as CSV (easy + robust)
+write.csv(sum_fit_k,
+          file = file.path("results/tables", paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# Optional: save as LaTeX table using knitr + kableExtra
+library(dplyr)
+library(knitr)
+
+sum_fit_k_small <- sum_fit_k %>%
+  filter(grepl("^b_|^ar\\[|^sigma$|^sds_|^sd_", variable)) %>%
+  select(variable, mean, sd,rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+# create LaTeX table
+tex <- knitr::kable(
+  sum_fit_k_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for the hierarchical GAM + AR(1) model with turbine-level random effects.",
+  label = "tab:fit_k_main"
+)
+
+dir.create("results/tables", recursive = TRUE, showWarnings = FALSE)
+writeLines(tex, "results/tables/fit_k_main.tex")
+
+````
+
+````{r}
+
+# # ---- folders ----
+# dir.create("results", showWarnings = FALSE)
+# dir.create("results/figures", showWarnings = FALSE)
+# dir.create("results/tables", showWarnings = FALSE)
+# dir.create("results/models", showWarnings = FALSE)
+
+# Give the model a name (useful if you have many)
+MODEL_NAME <- "fit_single"
+
+# ---- 1) Save model object ----
+saveRDS(fit_single, file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_single <- residuals(fit_single, summary = TRUE)[, "Estimate"]
+
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_single, main = "ACF of residuals (Linear model (single turbine))")
+dev.off()
+
+# # Also save lag-1 residual correlation to a text file
+# lag1_cor <- cor(res_k[-1], res_k[-length(res_k)], use = "complete.obs")
+# writeLines(paste("Lag-1 residual correlation:", lag1_cor),
+#            con = file.path("results", paste0(MODEL_NAME, "_residual_cor.txt")))
+
+# ---- 3) MCMC trace plots ----
+# mcmc_plot returns a ggplot, so save with ggsave
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_single, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_single)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Smooth term plot (for GAM) ----
+# p_smooth <- plot(conditional_smooths(fit_single), ask = FALSE)[[1]]
+# ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_smooth.png")),
+#        plot = p_smooth, width = 12, height = 7, dpi = 150)
+
+# ---- 6) Posterior summary table (dataframe) ----
+library(posterior)
+
+posterior_summary_table <- function(fit_single, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit_single),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_single <- posterior_summary_table(fit_single)
+
+# Save as CSV (easy + robust)
+write.csv(sum_fit_single,
+          file = file.path("results/tables", paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# Optional: save as LaTeX table using knitr + kableExtra
+library(dplyr)
+library(knitr)
+
+sum_fit_single_small <- sum_fit_single %>%
+  filter(grepl("^b_|^ar\\[|^sigma$|^sds_|^sd_", variable)) %>%
+  select(variable, mean, sd,rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+# create LaTeX table
+tex <- knitr::kable(
+  sum_fit_single_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for Linear model (single turbine).",
+  label = "tab:fit_single_main"
+)
+
+dir.create("results/tables", recursive = TRUE, showWarnings = FALSE)
+writeLines(tex, "results/tables/fit_single_main.tex")
+
+````
+
+````{r}
+# Give the model a name
+MODEL_NAME <- "fit_ar_single"
+
+# ---- create folders (safe) ----
+dir.create("results/models", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/tables",  recursive = TRUE, showWarnings = FALSE)
+
+# ---- 1) Save model object ----
+saveRDS(fit_ar_single,
+        file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_ar <- residuals(fit_ar_single, summary = TRUE)[, "Estimate"]
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_ar, main = "ACF of residuals (Linear + AR(1) model)")
+dev.off()
+
+# ---- 3) MCMC trace plots ----
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_ar_single, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_ar_single)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Posterior summary table ----
+library(posterior)
+
+posterior_summary_table <- function(fit, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_ar_single <- posterior_summary_table(fit_ar_single)
+
+# ---- save full table ----
+write.csv(sum_fit_ar_single,
+          file = file.path("results/tables",
+                           paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# ---- compact table for report ----
+library(dplyr)
+library(knitr)
+
+sum_fit_ar_single_small <- sum_fit_ar_single %>%
+  filter(grepl("^b_|^ar\\[|^sigma$|^sds_|^sd_", variable)) %>%
+  select(variable, mean, sd, rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+tex <- knitr::kable(
+  sum_fit_ar_single_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for the linear AR(1) model (single turbine).",
+  label = "tab:fit_ar_single_main"
+)
+
+writeLines(tex,
+           file.path("results/tables",
+                     paste0(MODEL_NAME, "_main.tex")))
+````
+
+````{r}
+# Give the model a name
+MODEL_NAME <- "fit_k_single"
+
+# ---- create folders (safe) ----
+dir.create("results/models", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/tables",  recursive = TRUE, showWarnings = FALSE)
+
+# ---- 1) Save model object ----
+saveRDS(fit_k_single,
+        file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_k <- residuals(fit_k_single, summary = TRUE)[, "Estimate"]
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_k, main = "ACF of residuals (GAM model, no AR (single turbine))")
+dev.off()
+
+# ---- 3) MCMC trace plots ----
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_k_single, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_k_single)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Smooth term plot (GAM) ----
+p_smooth <- plot(conditional_smooths(fit_k_single), ask = FALSE)[[1]]
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_smooth.png")),
+       plot = p_smooth, width = 12, height = 7, dpi = 150)
+
+# ---- 6) Posterior summary table ----
+library(posterior)
+
+posterior_summary_table <- function(fit, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_k_single <- posterior_summary_table(fit_k_single)
+
+# ---- save full table ----
+write.csv(sum_fit_k_single,
+          file = file.path("results/tables",
+                           paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# ---- compact table for report ----
+library(dplyr)
+library(knitr)
+
+sum_fit_k_single_small <- sum_fit_k_single %>%
+  filter(grepl("^b_|^sigma$|^sds_", variable)) %>%  # no AR, no random effects
+  select(variable, mean, sd, rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+tex <- knitr::kable(
+  sum_fit_k_single_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for the nonlinear GAM model (single turbine).",
+  label = "tab:fit_k_single_main"
+)
+
+writeLines(tex,
+           file.path("results/tables",
+                     paste0(MODEL_NAME, "_main.tex")))
+````
+
+````{r}
+# Give the model a name
+MODEL_NAME <- "fit_k_ar_single"
+
+# ---- create folders (safe) ----
+dir.create("results/models", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/tables",  recursive = TRUE, showWarnings = FALSE)
+
+# ---- 1) Save model object ----
+saveRDS(fit_k_ar_single,
+        file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_kar <- residuals(fit_k_ar_single, summary = TRUE)[, "Estimate"]
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_kar, main = "ACF of residuals (GAM + AR(1) model(single turbine))")
+dev.off()
+
+# ---- 3) MCMC trace plots ----
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_k_ar_single, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_k_ar_single)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Smooth term plot ----
+p_smooth <- plot(conditional_smooths(fit_k_ar_single), ask = FALSE)[[1]]
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_smooth.png")),
+       plot = p_smooth, width = 12, height = 7, dpi = 150)
+
+# ---- 6) Posterior summary table ----
+library(posterior)
+
+posterior_summary_table <- function(fit, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_k_ar_single <- posterior_summary_table(fit_k_ar_single)
+
+# ---- save full table ----
+write.csv(sum_fit_k_ar_single,
+          file = file.path("results/tables",
+                           paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# ---- compact table for report ----
+library(dplyr)
+library(knitr)
+
+sum_fit_k_ar_single_small <- sum_fit_k_ar_single %>%
+  filter(grepl("^b_|^ar\\[|^sigma$|^sds_", variable)) %>%
+  select(variable, mean, sd, rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+tex <- knitr::kable(
+  sum_fit_k_ar_single_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for the nonlinear GAM + AR(1) model (single turbine).",
+  label = "tab:fit_k_ar_single_main"
+)
+
+writeLines(tex,
+           file.path("results/tables",
+                     paste0(MODEL_NAME, "_main.tex")))
+````
+````{r}
+# Give the model a name
+MODEL_NAME <- "fit_gam_ar1_gr"
+
+# ---- create folders (safe) ----
+dir.create("results/models", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/figures", recursive = TRUE, showWarnings = FALSE)
+dir.create("results/tables",  recursive = TRUE, showWarnings = FALSE)
+
+# ---- 1) Save model object ----
+saveRDS(fit_gam_ar1_gr,
+        file = file.path("results/models", paste0(MODEL_NAME, ".rds")))
+
+# ---- 2) Residual ACF plot ----
+res_gr <- residuals(fit_gam_ar1_gr, summary = TRUE)[, "Estimate"]
+
+png(file.path("results/figures", paste0(MODEL_NAME, "_acf.png")),
+    width = 1400, height = 900, res = 150)
+acf(res_gr, main = "ACF of residuals (GAM + (AR(1) per turbine), no random effects)")
+dev.off()
+
+# ---- 3) MCMC trace plots ----
+library(ggplot2)
+
+p_trace <- mcmc_plot(fit_gam_ar1_gr, type = "trace")
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_trace.png")),
+       plot = p_trace, width = 12, height = 7, dpi = 150)
+
+# ---- 4) Posterior predictive check ----
+p_pp <- pp_check(fit_gam_ar1_gr)
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_ppcheck.png")),
+       plot = p_pp, width = 12, height = 7, dpi = 150)
+
+# ---- 5) Smooth term plot ----
+p_smooth <- plot(conditional_smooths(fit_gam_ar1_gr), ask = FALSE)[[1]]
+ggsave(filename = file.path("results/figures", paste0(MODEL_NAME, "_smooth.png")),
+       plot = p_smooth, width = 12, height = 7, dpi = 150)
+
+# ---- 6) Posterior summary table ----
+library(posterior)
+
+posterior_summary_table <- function(fit, probs = c(0.05, 0.5, 0.95)) {
+  posterior::summarise_draws(
+    posterior::as_draws_array(fit),
+    "mean", "sd", "rhat", "ess_bulk", "ess_tail",
+    q05 = ~posterior::quantile2(.x, probs[1]),
+    q50 = ~posterior::quantile2(.x, probs[2]),
+    q95 = ~posterior::quantile2(.x, probs[3])
+  )
+}
+
+sum_fit_gam_ar1_gr <- posterior_summary_table(fit_gam_ar1_gr)
+
+# ---- save full table ----
+write.csv(sum_fit_gam_ar1_gr,
+          file = file.path("results/tables",
+                           paste0(MODEL_NAME, "_posterior_summary.csv")),
+          row.names = FALSE)
+
+# ---- compact table for report ----
+library(dplyr)
+library(knitr)
+
+sum_fit_gam_ar1_gr_small <- sum_fit_gam_ar1_gr %>%
+  filter(grepl("^b_|^ar\\[|^sigma$|^sds_", variable)) %>%  # no random intercept SD here
+  select(variable, mean, sd, rhat) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+tex <- knitr::kable(
+  sum_fit_gam_ar1_gr_small,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Posterior summary for the GAM + (AR(1) per turbine), no random effects).",
+  label = "tab:fit_gam_ar1_gr_main"
+)
+
+writeLines(tex,
+           file.path("results/tables",
+                     paste0(MODEL_NAME, "_main.tex")))
+````
+
+```{r}
+library(loo)
+
+loo_single        <- loo(fit_single)
+loo_k_single      <- loo(fit_k_single)
+loo_ar_single     <- loo(fit_ar_single)
+loo_k_ar_single   <- loo(fit_k_ar_single)
+loo_gam_ar1_gr    <- loo(fit_gam_ar1_gr)
+loo_k             <- loo(fit_k)
+```
+
+````{r}
+loo_compare(
+  loo_single,
+  loo_k_single,
+  loo_ar_single,
+  loo_k_ar_single
+
+)
+loo_compare(
+  loo_gam_ar1_gr,
+  loo_k)
+````
